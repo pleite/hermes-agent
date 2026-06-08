@@ -7,6 +7,7 @@ assemble pieces, then combines them with memory and ephemeral prompts.
 import json
 import logging
 import os
+import re
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -59,6 +60,37 @@ def _scan_context_content(content: str, filename: str) -> str:
         return f"[BLOCKED: {filename} contained potential prompt injection ({', '.join(findings)}). Content not loaded.]"
 
     return content
+
+
+# Matches an ``<available_skills>…</available_skills>`` block (and any
+# trailing whitespace) so it can be stripped from user-editable context
+# files such as SOUL.md.  The skills index is injected separately by
+# ``build_skills_system_prompt()`` with its own stable two-layer cache;
+# keeping a copy inside SOUL.md busts the prefix cache on every skill
+# mutation (see docs/specs/stable-skills-index-prefix-cache.md).
+_AVAILABLE_SKILLS_BLOCK_RE = re.compile(
+    r"<available_skills>.*?</available_skills>\s*",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_available_skills_block(content: str, filename: str) -> str:
+    """Remove any ``<available_skills>…</available_skills>`` block.
+
+    The skills index is the largest single block in the system prompt and
+    changes on every ``skill_manage`` mutation.  When it lives inside a
+    stable-tier file like SOUL.md it cache-invalidates the entire prefix
+    that follows.  Strip it on load so old installs self-heal; the index
+    is injected separately via ``build_skills_system_prompt()``.
+    """
+    stripped = _AVAILABLE_SKILLS_BLOCK_RE.sub("", content)
+    if stripped != content:
+        logger.info(
+            "Stripped <available_skills> block from %s to keep the prefix "
+            "cache stable; the skills index is injected separately.",
+            filename,
+        )
+    return stripped.strip()
 
 
 def _find_git_root(start: Path) -> Optional[Path]:
@@ -1416,6 +1448,9 @@ def load_soul_md() -> Optional[str]:
         return None
     try:
         content = soul_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return None
+        content = _strip_available_skills_block(content, "SOUL.md")
         if not content:
             return None
         content = _scan_context_content(content, "SOUL.md")
