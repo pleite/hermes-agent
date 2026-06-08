@@ -45,6 +45,40 @@ def _captured_context_cwd(agent):
     return captured["cwd"]
 
 
+class TestSkillsIndexEmittedLast:
+    def test_skills_marker_after_static_blocks(self, monkeypatch):
+        # The mutable skills index must be the LAST block in the stable tier so
+        # a skill mutation doesn't cache-invalidate the static blocks that used
+        # to follow it (alibaba workaround, environment hints, Python probe,
+        # active-profile hint, platform hints).
+        monkeypatch.delenv("TERMINAL_CWD", raising=False)
+        agent = _make_agent(
+            valid_tool_names=["skills_list"],
+            platform="cli",  # triggers a platform-hint block
+        )
+
+        env_marker = "ENV-HINT-MARKER"
+        skills_marker = "<available_skills>SKILL</available_skills>"
+
+        with (
+            patch("run_agent.load_soul_md", return_value=""),
+            patch("run_agent.build_nous_subscription_prompt", return_value=""),
+            patch("run_agent.build_environment_hints", return_value=env_marker),
+            patch("run_agent.build_context_files_prompt", return_value=""),
+            patch("run_agent.get_toolset_for_tool", return_value=None),
+            patch("run_agent.build_skills_system_prompt", return_value=skills_marker),
+        ):
+            parts = build_system_prompt_parts(agent)
+
+        stable = parts["stable"]
+        assert "<available_skills>" in stable
+        assert env_marker in stable
+        # Environment hint, active-profile hint, and platform hint must all
+        # precede the skills index marker.
+        assert stable.index(env_marker) < stable.index("<available_skills>")
+        assert stable.index("Active Hermes profile:") < stable.index("<available_skills>")
+
+
 class TestContextFileCwd:
     def test_none_when_terminal_cwd_unset(self, monkeypatch):
         # Unset → None, so discovery falls back to the launch dir inside
