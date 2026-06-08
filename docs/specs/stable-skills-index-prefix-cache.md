@@ -141,3 +141,45 @@ in an immutable-by-design slot.
   two-layer disk+LRU cache
 - PR #20451 — date-only timestamp (same class of cache-stability fix)
 - `references/system-prompt-invariant.md` (internal dev doc)
+---
+
+## Addendum — Verified root cause (2026-06-08)
+
+Investigation of a live incident (local llama-server / Gemma4-26B slot bust) revealed
+the **actual** primary root cause: **model-family guidance blocks injected into the
+stable tier based on runtime model name**.
+
+`build_system_prompt_parts()` injects `GOOGLE_MODEL_OPERATIONAL_GUIDANCE` when
+`"gemma"` or `"gemini"` appears in `agent.model`, and `OPENAI_MODEL_EXECUTION_GUIDANCE`
+for `"gpt"` / `"codex"` / `"grok"`. These are part of the **stable tier**, meaning they
+are fixed for the session lifetime — but they differ between the primary provider
+(e.g. `claude-sonnet-4.6` → no Google guidance) and the fallback provider
+(`gemma-4-26b-a4b` → Google guidance injected). When a KV slot is saved under
+the primary and then restored for a fallback session, the stable prompt differs
+from byte ~1 of the guidance block, busting the entire prefix cache.
+
+The `<available_skills>` issue (original spec) is also real and compounds the
+problem: any skill edit mutates the skills index block later in the stable tier,
+which also causes a prefix mismatch. Both issues are addressed by this PR.
+
+### What this PR implements
+
+1. **`agent/prompt_builder.py` — `load_soul_md()`**: strip any
+   `<available_skills>…</available_skills>` block from SOUL.md at load time.
+   Migration: existing installs self-heal without user action.
+
+2. **`agent/system_prompt.py` — model-family guidance**: add a config key
+   `agent.model_family` (`"google"` | `"openai"` | `""` / unset = auto) that
+   overrides the model-name heuristic for guidance injection. When set, the stable
+   prompt is byte-stable across provider switches (e.g. primary=claude, fallback=gemma
+   both with `model_family: google` → same stable bytes → slot restore succeeds).
+
+### Config usage (new)
+
+```yaml
+agent:
+  model_family: google  # force Google operational guidance regardless of model name
+                        # set once for a local gemma backend; clear when switching back
+```
+
+Unset (default `""`) preserves existing auto-detection behaviour — no regression.

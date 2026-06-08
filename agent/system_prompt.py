@@ -36,7 +36,6 @@ from agent.prompt_builder import (
     PLATFORM_HINTS,
     SESSION_SEARCH_GUIDANCE,
     SKILLS_GUIDANCE,
-    STEER_CHANNEL_NOTE,
     TASK_COMPLETION_GUIDANCE,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
@@ -132,11 +131,6 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
 
-    # Steering only lands inside tool results, so it's only reachable when the
-    # agent has tools. Static text → byte-stable prompt (no cache hit).
-    if agent.valid_tool_names:
-        stable_parts.append(STEER_CHANNEL_NOTE)
-
     # Computer-use (macOS) — goes in as its own block rather than being
     # merged into tool_guidance because the content is multi-paragraph.
     if "computer_use" in agent.valid_tool_names:
@@ -170,16 +164,34 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         if _inject:
             stable_parts.append(TOOL_USE_ENFORCEMENT_GUIDANCE)
             _model_lower = (agent.model or "").lower()
+            # Allow an explicit config override (agent.model_family: "google" |
+            # "openai" | "") to force the right guidance block independent of
+            # the runtime model name.  This keeps the stable prompt byte-stable
+            # when the same llama-server slot is reused across sessions that
+            # differ only in their model alias (e.g. primary=claude, fallback=gemma).
+            _model_family_cfg = str(
+                getattr(agent, "_model_family", None) or ""
+            ).lower().strip()
+            _is_google = (
+                _model_family_cfg == "google"
+                or (not _model_family_cfg and (
+                    "gemini" in _model_lower or "gemma" in _model_lower
+                ))
+            )
+            _is_openai = (
+                _model_family_cfg == "openai"
+                or (not _model_family_cfg and (
+                    "gpt" in _model_lower or "codex" in _model_lower or "grok" in _model_lower
+                ))
+            )
             # Google model operational guidance (conciseness, absolute
             # paths, parallel tool calls, verify-before-edit, etc.)
-            if "gemini" in _model_lower or "gemma" in _model_lower:
+            if _is_google:
                 stable_parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
             # OpenAI GPT/Codex execution discipline (tool persistence,
             # prerequisite checks, verification, anti-hallucination).
-            # Also applied to xAI Grok — same failure modes (claims completion
-            # without tool calls, suggests workarounds instead of using
-            # existing tools, replies with plans instead of executing).
-            if "gpt" in _model_lower or "codex" in _model_lower or "grok" in _model_lower:
+            # Also applied to xAI Grok — same failure modes.
+            if _is_openai:
                 stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
 
     has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
