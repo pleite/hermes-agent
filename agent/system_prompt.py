@@ -11,8 +11,10 @@ Three tiers are joined with ``\\n\\n``:
 
 * ``stable``   — identity (SOUL.md or DEFAULT_AGENT_IDENTITY), tool
   guidance, computer-use guidance, nous subscription block, tool-use
-  enforcement guidance + per-model operational guidance, skills prompt,
-  alibaba model-name workaround, environment hints, platform hints.
+  enforcement guidance + per-model operational guidance, alibaba
+  model-name workaround, environment hints, platform hints, and the
+  mutable skills index emitted last (so a skill change re-prefills only
+  the skills block plus the already-variable context/volatile tiers).
 * ``context``  — caller-supplied ``system_message`` plus context files
   (AGENTS.md / .cursorrules / etc.) discovered under ``TERMINAL_CWD``.
 * ``volatile`` — memory snapshot, USER.md profile, external memory
@@ -63,9 +65,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     """Assemble the system prompt as three ordered parts.
 
     Returns a dict with three keys:
-      * ``stable``   — identity, tool guidance, skills prompt,
-        environment hints, platform hints, model-family operational
-        guidance.
+      * ``stable``   — identity, tool guidance, environment hints,
+        platform hints, model-family operational guidance, and the
+        skills prompt emitted last.
       * ``context``  — context files (AGENTS.md, .cursorrules, etc.)
         and caller-supplied system_message.
       * ``volatile`` — memory snapshot, user profile, external
@@ -182,24 +184,6 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             if "gpt" in _model_lower or "codex" in _model_lower or "grok" in _model_lower:
                 stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
 
-    has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
-    if has_skills_tools:
-        avail_toolsets = {
-            toolset
-            for toolset in (
-                _r.get_toolset_for_tool(tool_name) for tool_name in agent.valid_tool_names
-            )
-            if toolset
-        }
-        skills_prompt = _r.build_skills_system_prompt(
-            available_tools=agent.valid_tool_names,
-            available_toolsets=avail_toolsets,
-        )
-    else:
-        skills_prompt = ""
-    if skills_prompt:
-        stable_parts.append(skills_prompt)
-
     # Alibaba Coding Plan API always returns "glm-4.7" as model name regardless
     # of the requested model. Inject explicit model identity into the system prompt
     # so the agent can correctly report which model it is (workaround for API bug).
@@ -284,6 +268,30 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
                 stable_parts.append(_entry.platform_hint)
         except Exception:
             pass
+
+    # Skills index — emitted LAST in the stable tier (after the alibaba
+    # workaround, environment hints, Python probe, active-profile hint, and
+    # platform hints) so that a skill mutation only re-prefills this block plus
+    # the already-variable context/volatile tiers.  Keeping it last means the
+    # static trailing blocks stay cached when skills change.  See
+    # ``build_skills_system_prompt`` for the marker contents.
+    has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
+    if has_skills_tools:
+        avail_toolsets = {
+            toolset
+            for toolset in (
+                _r.get_toolset_for_tool(tool_name) for tool_name in agent.valid_tool_names
+            )
+            if toolset
+        }
+        skills_prompt = _r.build_skills_system_prompt(
+            available_tools=agent.valid_tool_names,
+            available_toolsets=avail_toolsets,
+        )
+    else:
+        skills_prompt = ""
+    if skills_prompt:
+        stable_parts.append(skills_prompt)
 
     # ── Context tier (cwd-dependent, may change between sessions) ─
     context_parts: List[str] = []
